@@ -8,6 +8,9 @@
 %% API - similar to OTP `gb_trees` module
 -export([empty/0,
          empty_with_backend/0,
+         proxy_tree/1,
+         get_mtree/1,
+         set_mtree/2,
          get/2,
          lookup/2,
          new_with_backend/1,
@@ -32,6 +35,9 @@
         , lookup_poi/2
         ]).
 
+-export([ record_fields/1
+        , pp_term/1 ]).
+
 -ifdef(TEST).
 -export([delete/2]).
 -endif.
@@ -46,6 +52,17 @@
 -type key() :: aec_keys:pubkey().
 -type value() :: aec_accounts:deterministic_account_binary_with_pubkey().
 -opaque tree() :: aeu_mtrees:mtree(key(), value()).
+
+%% ==================================================================
+%% Trace support
+
+record_fields(_) -> {check_mods, [ aec_accounts ]}.
+
+pp_term(Term) ->
+    aeu_mp_trees:tree_pp_term(Term, '$accounts', fun aec_accounts:deserialize/2).
+
+%% ==================================================================
+
 
 -define(VSN, 1).
 %%%===================================================================
@@ -66,6 +83,16 @@ new_with_backend(Hash) ->
 -spec new_with_dirty_backend(aeu_mtrees:root_hash() | 'empty') -> tree().
 new_with_dirty_backend(Hash) ->
     aeu_mtrees:new_with_backend(Hash, aec_db_backends:dirty_accounts_backend()).
+
+-spec proxy_tree(aeu_mtrees:mtree()) -> tree().
+proxy_tree(Tree) ->
+    Tree.
+
+get_mtree(Tree) ->
+    Tree.
+
+set_mtree(Tree, _) ->
+    Tree.
 
 -spec gc_cache(tree()) -> tree().
 gc_cache(Tree) ->

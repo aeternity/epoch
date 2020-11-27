@@ -21,12 +21,18 @@
          oracles/1,
          calls/1,
          contracts/1,
+         get_tree/2,
+         set_tree/3,
+         get_mtree/2,
+         set_mtree/3,
+         types/0,
          set_accounts/2,
          set_calls/2,
          set_channels/2,
          set_contracts/2,
          set_ns/2,
          set_oracles/2,
+         proxy_trees/1,
          gc_cache/2,
          sum_total_coin/1
         ]).
@@ -44,6 +50,7 @@
 -export([apply_txs_on_state_trees/3,
          apply_txs_on_state_trees/4,
          apply_txs_on_state_trees_strict/3,
+         apply_one_tx/5,
          grant_fee/3,
          perform_pre_transformations/3
         ]).
@@ -59,13 +66,21 @@
          verify_poi/4
         ]).
 
--export([record_fields/1]).
+-export([ record_fields/1
+        , pp_term/1 ]).
 
 -ifdef(TEST).
 -export([internal_serialize_poi_fields/1,
          internal_serialize_poi_from_fields/1
         ]).
 -endif.
+
+%% -type tree() :: aec_accounts_trees:tree()
+%%               | aec_call_state_tree:tree()
+%%               | aesc_state_tree:tree()
+%%               | aect_state_tree:tree()
+%%               | aens_state_tree:tree()
+%%               | aeo_state_tree:tree().
 
 -record(trees, {
           accounts  :: aec_accounts_trees:tree(),
@@ -95,7 +110,21 @@
                    | 'ns'
                    | 'oracles'.
 
+-type subtree_type() :: tree_type() | ns_cache | oracles_cache.
+
+-type signed_txs()  :: [aetx_sign:signed_tx()].
+-type valid_txs()   :: signed_txs().
+-type invalid_txs() :: signed_txs().
+-type opts()        :: proplists:proplist().
+-type env()         :: aetx_env:env().
+-type events()      :: aetx_env:events().
+
+-type apply_result() :: {ok, valid_txs(), invalid_txs(), trees(), events()}
+                      | {error, term()}.
+
 -export_type([ trees/0
+             , tree_type/0
+             , subtree_type/0
              , poi/0
              ]).
 
@@ -105,13 +134,58 @@
 %% Tracing support
 record_fields(trees) -> record_info(fields, trees);
 record_fields(poi  ) -> record_info(fields, poi);
-record_fields(_    ) -> {check_mods, [ aeu_mp_trees
+record_fields(_    ) -> {check_mods, [ aetx_sign
+                                     , aeu_mp_trees
                                      , aec_accounts_trees
                                      , aect_state_tree
                                      , aect_call_state_tree
                                      , aec_state_tree
                                      , aens_state_tree
-                                     , aeo_state_tree ]}.
+                                     , aeo_state_tree | aetx:tx_callbacks() ]}.
+
+-dialyzer([{nowarn_function, pp_term/1}, no_opaque]).
+pp_term(#trees{ accounts  = A
+              , calls     = C
+              , channels  = Ch
+              , contracts = Co
+              , ns      = Ns
+              , oracles   = Or } = Trees) ->
+    {yes, Trees#trees{ accounts  = sub_pp(aec_accounts_trees, A)
+                     , calls     = sub_pp(aect_call_state_tree, C)
+                     , channels  = sub_pp(aesc_state_tree, Ch)
+                     , contracts = sub_pp(aect_state_tree, Co)
+                     , ns        = sub_pp(aens_state_tree, Ns)
+                     , oracles   = sub_pp(aeo_state_tree, Or) }};
+pp_term(T) when element(1, T) == mpt ->
+    Handle = aeu_mp_trees_db:get_handle(aeu_mp_trees:db(T)),
+    {Tag, Deserialize} = deser_fun(Handle),
+    aeu_mp_trees:tree_pp_term(T, Tag, Deserialize);
+pp_term(_) ->
+    no.
+
+sub_pp(M, X) ->
+    tr_ttb:pp_term(X, M).
+
+%% This is dirty, but will have to do for now.
+-dialyzer([{nowarn_function, deser_fun/1}, no_unused]).
+deser_fun(accounts) -> {'$accounts', fun aec_accounts:deserialize/2};
+deser_fun(dirty_accounts) -> {'$accounts', fun aec_accounts:deserialize/2};
+deser_fun(calls) -> {'$calls', fun aect_call:deserialize/2};
+deser_fun(dirty_calls) -> {'$calls', fun aect_call:deserialize/2};
+deser_fun(channels) -> {'$channels', fun aesc_channels:deserialize/2};
+deser_fun(dirty_channels) -> {'$channels', fun aesc_channels:deserialize/2};
+deser_fun(contracts) -> {'$contracts', fun aect_contracts:deserialize/2};
+deser_fun(dirty_contracts) -> {'$contracts', fun aect_contracts:deserialize/2};
+deser_fun(ns) -> {'$ns', fun aens_state_tree:deserialize_name_or_commitment/2};
+deser_fun(dirty_ns) -> {'$ns', fun aens_state_tree:deserialize_name_or_commitment/2};
+deser_fun(ns_cache) -> {'$ns', fun aens_state_tree:deserialize_name_or_commitment/2};
+deser_fun(dirty_ns_cache) -> {'$ns', fun aens_state_tree:deserialize_name_or_commitment/2};
+deser_fun(oracles) -> {'$oracles', fun aeo_state_tree:deserialize_value/2};
+deser_fun(dirty_oracles) -> {'$oracles', fun aeo_state_tree:deserialize_value/2};
+deser_fun(oracles_cache) -> {'$oracles', fun aeo_state_tree:deserialize_value/2};
+deser_fun(dirty_oracles_cache) -> {'$oracles', fun aeo_state_tree:deserialize_value/2};
+deser_fun(_) -> {'$mpt', fun(X) -> X end}.
+
 %% ==================================================================
 
 %%%%=============================================================================
@@ -277,6 +351,47 @@ apply_pre_transformations(?FORTUNA_PROTOCOL_VSN, Trees, _TxEnv) ->
 apply_pre_transformations(?LIMA_PROTOCOL_VSN, Trees, TxEnv) ->
     aec_block_fork:apply_lima(Trees, TxEnv).
 
+get_tree(channels, Trees)  -> channels(Trees);
+get_tree(ns, Trees)        -> ns(Trees);
+get_tree(oracles, Trees)   -> oracles(Trees);
+get_tree(calls, Trees)     -> calls(Trees);
+get_tree(accounts, Trees)  -> accounts(Trees);
+get_tree(contracts, Trees) -> contracts(Trees).
+
+set_tree(channels, T, Trees)  -> set_channels(Trees, T);
+set_tree(ns, T, Trees)        -> set_ns(Trees, T);
+set_tree(oracles, T, Trees)   -> set_oracles(Trees, T);
+set_tree(calls, T, Trees)     -> set_calls(Trees, T);
+set_tree(accounts, T, Trees)  -> set_accounts(Trees, T);
+set_tree(contracts, T, Trees) -> set_contracts(Trees, T).
+
+get_mtree(contracts, Trees) ->
+    aect_state_tree:get_mtree(contracts(Trees));
+get_mtree(ns, Trees) ->
+    aens_state_tree:get_mtree(ns(Trees));
+get_mtree(calls, Trees) ->
+    aect_call_state_tree:get_mtree(calls(Trees));
+get_mtree(oracles, Trees) ->
+    aeo_state_tree:get_mtree(oracles(Trees));
+get_mtree(channels, Trees) ->
+    aesc_state_tree:get_mtree(channels(Trees));
+get_mtree(accounts, Trees) ->
+    aec_accounts_trees:get_mtree(accounts(Trees)).
+
+set_mtree(contracts, T, Trees) ->
+    set_contracts(Trees, aect_state_tree:set_mtree(T, contracts(Trees)));
+set_mtree(ns, T, Trees) ->
+    set_ns(Trees, aens_state_tree:set_mtree(T, ns(Trees)));
+set_mtree(calls, T, Trees) ->
+    set_calls(Trees, aect_call_state_tree:set_mtree(T, calls(Trees)));
+set_mtree(oracles, T, Trees) ->
+    set_oracles(Trees, aeo_state_tree:set_mtree(T, oracles(Trees)));
+set_mtree(channels, T, Trees) ->
+    set_channels(Trees, aesc_state_tree:set_mtree(T, channels(Trees)));
+set_mtree(accounts, T, Trees) ->
+    set_accounts(Trees, aec_accounts_trees:set_mtree(T, accounts(Trees))).
+
+
 -spec calls(trees()) -> aect_call_state_tree:tree().
 calls(Trees) ->
     Trees#trees.calls.
@@ -393,6 +508,88 @@ sum_auctions({AuctionHash, SerAuction, Iter}, Acc) ->
     Auction = aens_auctions:deserialize(AuctionHash, SerAuction),
     Acc1 = Acc + aens_auctions:name_fee(Auction),
     sum_auctions(aens_state_tree:auction_iterator_next(Iter), Acc1).
+
+%% root_hashes(Trees) ->
+%%     lists:foldl(
+%%       fun({Type, Mod}, Acc) ->
+%%               Acc#{Type => root_hash(Mod, get_tree(Type, Trees))}
+%%       end, #{}, types()).
+
+%% -type maybe_hash() :: empty | binary().
+
+%% -spec root_hash(tree_type(), tree()) -> maybe_hash() | {maybe_hash(), maybe_hash()}.
+%% root_hash(aens_state_tree, Tree) ->
+%%     {maybe_hash(aens_state_tree:root_hash(Tree)),
+%%      maybe_hash(aens_state_tree:cache_root_hash(Tree))};
+%% root_hash(aeo_state_tree, Tree) ->
+%%     {maybe_hash(aeo_state_tree:root_hash(Tree)),
+%%      maybe_hash(aeo_state_tree:cache_root_hash(Tree))};
+%% root_hash(Mod, Tree) ->
+%%     maybe_hash(Mod:root_hash(Tree)).
+
+%% maybe_hash({error, empty}) ->
+%%     empty;
+%% maybe_hash({ok, Hash}) ->
+%%     Hash.
+
+%% proxy_trees(ArgInitF)
+-spec proxy_trees(fun( (subtree_type()) -> aeu_mtrees:mtree() )) -> trees().
+proxy_trees(TreeF) when is_function(TreeF, 1) ->
+    #trees{ contracts = ptree(contracts, TreeF)
+          , calls     = ptree(calls    , TreeF)
+          , channels  = ptree(channels , TreeF)
+          , ns        = ptree(ns       , TreeF)
+          , oracles   = ptree(oracles  , TreeF)
+          , accounts  = ptree(accounts , TreeF)
+          }.
+    %% #trees{ contracts = ptree(contracts, Pid, maps:get(contracts, Roots))
+    %%       , calls     = ptree(calls, Pid, maps:get(calls, Roots))
+    %%       , channels  = ptree(channels, Pid, maps:get(channels, Roots))
+    %%       , ns        = ptree(ns, Pid, maps:get(ns, Roots))
+    %%       , oracles   = ptree(oracles, Pid, maps:get(oracles, Roots))
+    %%       , accounts  = ptree(accounts, Pid, maps:get(accounts, Roots))
+    %%       }.
+
+%% ptree(Tag, ProxyTree)
+ptree(contracts, TreeF) ->
+    aect_state_tree:proxy_tree(TreeF(contracts));
+ptree(calls, TreeF) ->
+    aect_call_state_tree:proxy_tree(TreeF(calls));
+ptree(channels, TreeF) ->
+    aesc_state_tree:proxy_tree(TreeF(channels));
+ptree(ns, TreeF) ->
+    MTree = TreeF(ns),
+    CTree = TreeF(ns_cache),
+    aens_state_tree:proxy_tree(MTree, CTree);
+ptree(oracles, TreeF) ->
+    OTree = TreeF(oracles),
+    CTree = TreeF(oracles_cache),
+    aeo_state_tree:proxy_tree(OTree, CTree);
+ptree(accounts, TreeF) ->
+    aec_accounts_trees:proxy_tree(TreeF(accounts)).
+
+%% tree_updates(Trees) ->
+%%     lists:foldr(fun({Type, Mod}, Acc) ->
+%%                         Updates = do_list_updates(Type, Mod, Trees),
+%%                         [{Type, Updates} | Acc]
+%%                 end, [], types()).
+
+types() ->
+    [ {contracts, aect_state_tree}
+    , {calls, aect_call_state_tree}
+    , {channels, aesc_state_tree}
+    , {ns, aens_state_tree}
+    , {oracles, aeo_state_tree}
+    , {accounts, aec_accounts_trees}].
+
+%% do_list_updates(Type, Mod, Trees) ->
+%%     MTree = get_mtree(Type, Trees),
+%%     case aeu_mtrees:root_hash(MTree) of
+%%         {error, empty} ->
+%%             {<<>>, []};
+%%         {ok, RootHash} ->
+%%             {RootHash, Mod:list_cache(MTree)}
+%%     end.
 
 %%%=============================================================================
 %%% Serialization for db storage
@@ -583,59 +780,112 @@ internal_commit_to_db(Trees) ->
                , accounts  = aec_accounts_trees:commit_to_db(accounts(Trees))
                }.
 
+-spec apply_txs_on_state_trees(signed_txs(), trees(), env()) -> apply_result().
 apply_txs_on_state_trees(SignedTxs, Trees, Env) ->
     apply_txs_on_state_trees(SignedTxs, [], [], Trees, Env, []).
+
+-spec apply_txs_on_state_trees(signed_txs(), trees(), env(), opts()) -> apply_result().
+apply_txs_on_state_trees(SignedTxs, Trees, Env, Opts) ->
+    apply_txs_on_state_trees(SignedTxs, [], [], Trees, Env, Opts).
+
+-spec par_apply_txs_on_state_trees(signed_txs(), valid_txs(), invalid_txs(),
+                                   trees(), env(), opts()) -> apply_result().
+par_apply_txs_on_state_trees(SignedTxs, Valid, Invalid, Trees, Env, Opts) ->
+    ParMaxDeps = proplists:get_value(par_max_deps_ratio, Opts, undefined),
+    case aec_trees_proxy:prepare_for_par_eval(SignedTxs) of
+        #{tx_count := TxC, max_dep_count := DepC} when (DepC / TxC) > ParMaxDeps ->
+            apply_txs_on_state_trees_(SignedTxs, Valid, Invalid, Trees, Env, Opts);
+        Context ->
+            Strict     = proplists:get_value(strict, Opts, false),
+            Result = aec_trees_proxy:par_eval(Trees, Env, Context, Opts),
+            check_par_apply_result(Result, Valid, Invalid, Trees, Env,
+                                   SignedTxs, Strict)
+            %% end
+    end.
+
+check_par_apply_result(Result, Valid, Invalid, Trees, Env,
+                       SignedTxs, Strict) ->
+    case Result of
+        {ok, Valid1, Invalid1, Trees1, Events1} ->
+            ValidTxs = fetch_txs(Valid1, SignedTxs),
+            InvalidTxs = fetch_txs(Invalid1, SignedTxs),
+            {ok, Valid ++ ValidTxs, Invalid ++ InvalidTxs, Trees1, Events1};
+        {error, _Reason} = Error ->
+            Error;
+        _Other ->
+            if Strict ->
+                    {error, internal_error};
+               true ->
+                    Events = aetx_env:events(Env),
+                    {ok, _ValidTxs = [], _InvalidTxs = SignedTxs,
+                     Trees, Events}
+            end
+    end.
+
+fetch_txs(all, SignedTxs) -> SignedTxs;
+fetch_txs(L, _SignedTxs)  -> L.
 
 apply_txs_on_state_trees_strict(SignedTxs, Trees, Env) ->
     apply_txs_on_state_trees(SignedTxs, [], [], Trees, Env, [strict, tx_events]).
 
-apply_txs_on_state_trees(SignedTxs, Trees, Env, Opts) ->
-    apply_txs_on_state_trees(SignedTxs, [], [], Trees, Env, Opts).
+apply_txs_on_state_trees(SignedTxs, Valid, Invalid, Trees, Env, Opts) ->
+    case proplists:get_bool(parallel, Opts) of
+        true ->
+            par_apply_txs_on_state_trees(SignedTxs, Valid, Invalid, Trees, Env, Opts);
+        false ->
+            apply_txs_on_state_trees_(SignedTxs, Valid, Invalid, Trees, Env, Opts)
+    end.
 
-apply_txs_on_state_trees([], ValidTxs, InvalidTxs, Trees,Env,Opts) ->
+apply_txs_on_state_trees_([], ValidTxs, InvalidTxs, Trees,Env,Opts) ->
     Events = case proplists:get_bool(tx_events, Opts) of
                  true -> aetx_env:events(Env);
                  false -> []
              end,
     {ok, lists:reverse(ValidTxs), lists:reverse(InvalidTxs), Trees, Events};
-apply_txs_on_state_trees([SignedTx | Rest], ValidTxs, InvalidTxs, Trees, Env, Opts) ->
+apply_txs_on_state_trees_([SignedTx | Rest], ValidTxs, InvalidTxs, Trees, Env, Opts) ->
     Strict     = proplists:get_value(strict, Opts, false),
     DontVerify = proplists:get_value(dont_verify_signature, Opts, false),
     Protocol   = aetx_env:consensus_version(Env),
+    try apply_one_tx(SignedTx, Trees, Env, DontVerify, Protocol) of
+        {ok, Trees1, Env20} ->
+            Env21 = aetx_env:update_env(Env20, Env),
+            Valid1 = [SignedTx | ValidTxs],
+            apply_txs_on_state_trees_(Rest, Valid1, InvalidTxs, Trees1, Env21, Opts);
+        {error, Reason} when Strict ->
+            lager:debug("Tx ~p cannot be applied due to an error ~p", [tx(SignedTx), Reason]),
+            {error, Reason};
+        {error, Reason} when not Strict ->
+            lager:debug("Tx ~p cannot be applied due to an error ~p", [tx(SignedTx), Reason]),
+            Invalid1 = [SignedTx | InvalidTxs],
+            apply_txs_on_state_trees_(Rest, ValidTxs, Invalid1, Trees, Env, Opts)
+    catch
+        Type:What when Strict ->
+            Reason = {Type, What},
+            lager:error("Tx ~p cannot be applied due to an error ~p", [tx(SignedTx), Reason]),
+            {error, Reason};
+        Type:What when not Strict ->
+            Reason = {Type, What},
+            lager:debug("Tx ~p cannot be applied due to an error ~p", [tx(SignedTx), Reason]),
+            Invalid1 = [SignedTx| InvalidTxs],
+            apply_txs_on_state_trees_(Rest, ValidTxs, Invalid1, Trees, Env, Opts)
+    end.
+
+tx(SignedTx) ->
+    aetx_sign:tx(SignedTx).
+
+%% apply_one_tx(SignedTx, Trees, Env, DontVerify) ->
+%%     Protocol = aetx_env:consensus_version(Env),
+%%     apply_one_tx(SignedTx, Trees, Env, DontVerify, Protocol).
+
+apply_one_tx(SignedTx, Trees, Env, DontVerify, Protocol) ->
     case verify_signature(SignedTx, Trees, Protocol, DontVerify) of
         ok ->
             Env1 = aetx_env:set_signed_tx(Env, {value, SignedTx}),
             Tx = aetx_sign:tx(SignedTx),
-            try aetx:process(Tx, Trees, Env1) of
-                {ok, Trees1, Env20} ->
-                    Env21 = aetx_env:update_env(Env20, Env),
-                    Valid1 = [SignedTx | ValidTxs],
-                    apply_txs_on_state_trees(Rest, Valid1, InvalidTxs, Trees1, Env21, Opts);
-                {error, Reason} when Strict ->
-                    lager:debug("Tx ~p cannot be applied due to an error ~p", [Tx, Reason]),
-                    {error, Reason};
-                {error, Reason} when not Strict ->
-                    lager:debug("Tx ~p cannot be applied due to an error ~p", [Tx, Reason]),
-                    Invalid1 = [SignedTx | InvalidTxs],
-                    apply_txs_on_state_trees(Rest, ValidTxs, Invalid1, Trees, Env, Opts)
-            catch
-                Type:What when Strict ->
-                    Reason = {Type, What},
-                    lager:error("Tx ~p cannot be applied due to an error ~p", [Tx, Reason]),
-                    {error, Reason};
-                Type:What when not Strict ->
-                    Reason = {Type, What},
-                    lager:debug("Tx ~p cannot be applied due to an error ~p", [Tx, Reason]),
-                    Invalid1 = [SignedTx| InvalidTxs],
-                    apply_txs_on_state_trees(Rest, ValidTxs, Invalid1, Trees, Env, Opts)
-            end;
-        {error, signature_check_failed} = E when Strict ->
+            aetx:process(Tx, Trees, Env1);
+        {error, signature_check_failed} = E ->
             lager:debug("Signed tx ~p is not correctly signed.", [SignedTx]),
-            E;
-        {error, signature_check_failed} when not Strict ->
-            lager:debug("Signed tx ~p is not correctly signed.", [SignedTx]),
-            Invalid1 = [SignedTx | InvalidTxs],
-            apply_txs_on_state_trees(Rest, ValidTxs, Invalid1, Trees, Env, Opts)
+            E
     end.
 
 verify_signature(_, _, _, true)               -> ok;

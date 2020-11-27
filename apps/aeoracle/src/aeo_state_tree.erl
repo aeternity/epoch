@@ -26,6 +26,9 @@
         , lookup_oracle/2
         , new_with_backend/2
         , new_with_dirty_backend/2
+        , proxy_tree/2
+        , get_mtree/1
+        , set_mtree/2
         , prune/2
         , root_hash/1
         ]).
@@ -34,7 +37,9 @@
         , to_binary_without_backend/1
         ]).
 
--export([record_fields/1]).
+-export([ record_fields/1
+        , pp_term/1
+        , deserialize_value/2]).
 
 -ifdef(TEST).
 -export([ query_list/1
@@ -82,6 +87,18 @@
 %% Tracing support
 record_fields(oracle_tree) -> record_info(fields, oracle_tree);
 record_fields(_          ) -> no.
+
+pp_term(#oracle_tree{ otree = OT, cache = Cache } = T) ->
+    {yes, T#oracle_tree{ otree = pp_tree(OT)
+                       , cache = pp_tree(Cache) }};
+pp_term(_) ->
+    no.
+
+pp_tree(T) ->
+    tr_ttb:pp_term(T, fun(T1) ->
+                              aeu_mp_trees:tree_pp_term(T1, '$oracles', fun deserialize_value/2)
+                      end).
+
 %% ==================================================================
 
 %%%===================================================================
@@ -119,6 +136,19 @@ new_with_dirty_backend(RootHash, CacheRootHash) ->
     #oracle_tree{ otree  = OTree
                 , cache  = Cache
                 }.
+
+-spec proxy_tree(aeu_mtrees:mtree(), aeu_mtrees:mtree()) -> tree().
+proxy_tree(OTree, Cache) ->
+    #oracle_tree{ otree = OTree
+                , cache = Cache }.
+
+-spec get_mtree(tree()) -> aeu_mtrees:mtree().
+get_mtree(#oracle_tree{otree = OTree}) ->
+    OTree.
+
+-spec set_mtree(aeu_mtrees:mtree(), tree()) -> tree().
+set_mtree(OTree, #oracle_tree{} = T) ->
+    T#oracle_tree{otree = OTree}.
 
 -spec prune(block_height(), aec_trees:trees()) -> aec_trees:trees().
 prune(Height, Trees) ->

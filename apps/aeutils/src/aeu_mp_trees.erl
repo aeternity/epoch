@@ -36,11 +36,17 @@
 %% For internal functional db
 -behavior(aeu_mp_trees_db).
 -export([ mpt_db_drop_cache/1
+        , mpt_db_list_cache/1
         , mpt_db_get/2
         , mpt_db_put/3
         ]).
 
--export([record_fields/1]).
+%% For receiving proxy tree updates
+-export([ apply_proxy_updates/3 ]).
+
+-export([ record_fields/1
+        , pp_term/1
+        , tree_pp_term/3 ]).
 
 -export_type([ tree/0
              , db/0
@@ -108,6 +114,58 @@ record_fields(mpt ) -> record_info(fields, mpt);
 record_fields(iter) -> record_info(fields, iter);
 record_fields(db  ) -> aeu_mp_trees_db:record_fields(db);
 record_fields(_   ) -> no.
+
+pp_term(#mpt{db = DB} = MPT) ->
+    case aeu_mp_trees_db:get_module(DB) of
+        ?MODULE ->
+            HandleL = pp_decode_list(dict:to_list(aeu_mp_trees_db:get_handle(DB))),
+            CacheL = pp_decode_list(dict:to_list(aeu_mp_trees_db:get_cache(DB))),
+            NewDB = aeu_mp_trees_db:new(#{ module => ?MODULE
+                                         , cache  => {'$mpt', CacheL}
+                                         , handle => {'$mpt', HandleL}}),
+            {yes, MPT#mpt{db = NewDB}};
+        _ ->
+            {yes, MPT#mpt{db = tr_ttb:pp_term(
+                                 tr_ttb:pp_term(DB, aeu_mp_trees_db), fun pp_db_decode/1)}}
+    end;
+pp_term(_) ->
+    no.
+
+pp_db_decode({'$db', L}) ->
+    {yes, {'$mpt', pp_decode_list(L)}};
+pp_db_decode(_) ->
+    no.
+
+pp_decode_list(L) ->
+    lists:foldr(fun pp_decode_db_entry/2, [], L).
+
+pp_decode_db_entry({_Hash, V}, Acc) ->
+    case V of
+        [CPath, Val] ->
+            case decode_path(CPath) of
+                {leaf, K} ->
+                    [{K, Val} | Acc];
+                _ ->
+                    Acc
+            end;
+        _ ->
+            Acc
+    end.
+
+%% Utility trace support for state tree modules
+%%
+tree_pp_term(#mpt{} = Term, CacheTag, XForm) ->
+    Dec = fun(X) -> pp_mpt_decode(X, CacheTag, XForm) end,
+    {yes, tr_ttb:pp_term(tr_ttb:pp_term(Term, aeu_mtrees), Dec)};
+tree_pp_term(_, _, _) ->
+    no.
+
+pp_mpt_decode({'$mpt', L}, Tag, XForm) ->
+    {yes, {Tag, [{K, XForm(K, V)}
+                 || {K, V} <- L]}};
+pp_mpt_decode(_, _, _) ->
+    no.
+
 %% ==================================================================
 
 %%%===================================================================
@@ -122,7 +180,12 @@ new() ->
 new(DB) ->
     #mpt{db = DB}.
 
--spec new(hash(), db()) -> tree().
+-spec new(hash() | {proxy, hash()}, db()) -> tree().
+new({proxy, RootHash}, DB) ->
+    %% Just assume that the root hash is present
+    #mpt{ hash = RootHash
+        , db   = DB
+        };
 new(RootHash, DB) ->
     %% Assert that at least the root hash is present in the db.
     _ = db_get(RootHash, DB),
@@ -200,7 +263,6 @@ gc_cache(#mpt{db = DB, hash = Hash} = MPT) ->
     FreshDB = db_drop_cache(DB),
     DB1 = int_visit_reachable_hashes_in_cache([Hash], DB, FreshDB, VisitFun),
     MPT#mpt{db = DB1}.
-
 
 -spec construct_proof(key(), db(), tree()) -> {value(), db()}.
 construct_proof(Key, ProofDB, #mpt{db = DB, hash = Hash}) ->
@@ -317,6 +379,14 @@ pp(#mpt{hash = Hash, db = DB}) ->
     [io:format("~s\n", [S])
      || S <- lists:flatten([pp_tree(decode_node(Hash, DB), DB)])],
     ok.
+
+apply_proxy_updates(Hash, Updates, #mpt{db = DB} = MPT) ->
+    DB1 = lists:foldl(fun apply_update/2, DB, Updates),
+    MPT#mpt{hash = Hash, db = DB1}.
+
+apply_update({Key, Value}, DB) ->
+    %% amounts to a cache update
+    aeu_mp_trees_db:put(Key, Value, DB).
 
 %%%===================================================================
 %%% Internal functions
@@ -1145,6 +1215,19 @@ mpt_db_put(Key, Val, Dict) ->
 
 mpt_db_drop_cache(_Cache) ->
     dict:new().
+
+mpt_db_list_cache(Cache) ->
+    dict:fold(fun cache_fold_f/3, [], Cache).
+
+cache_fold_f(_Hash, [CPath, Val], Acc) ->
+    case decode_path(CPath) of
+        {leaf, Key} ->
+            [{Key, Val}|Acc];
+        _ ->
+            Acc
+    end;
+cache_fold_f(_, _, Acc) ->
+    Acc.
 
 %%%===================================================================
 %%% Compact encoding of hex sequence with optional terminator
