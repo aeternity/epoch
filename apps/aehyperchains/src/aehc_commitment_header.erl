@@ -18,10 +18,9 @@
 %%%
 %%% @end
 %%%-------------------------------------------------------------------
-
 -module(aehc_commitment_header).
 
--export([ new/2
+-export([new/2
         , new/3
         , from_db/1
         , set_auth_data/2
@@ -29,42 +28,45 @@
         , hc_delegate/1
         , hc_keyblock/1
         , hc_pogf_hash/1
-        , hash/1
-        ]).
-
--include("../../aecore/include/blocks.hrl").
--include("aehc_utils.hrl").
-
--record(hc_commitment_header, {
-        %% Delegate who submitted the commitment
-        hc_delegate = <<0:?COMMITER_PUB_BYTES/unit:8>> :: commiter_pubkey(),
-        %% Hyperchain keyblock to which the delegate commited
-        hc_keyblock = <<0:?BLOCK_HEADER_HASH_BYTES/unit:8>> :: block_header_hash(),
-        %% Hash of PoGF object
-        hc_pogf_hash = <<0:?POGF_HASH_BYTES>> :: pogf_hash(),
-
-        %% Connector specific authorization data proving that the given delegate
-        %% submitted the commitment. In the friendly case of an AE parent chain
-        %% this could include the parent chain tx which includes the above data
-        %% TODO: Should this be included in the DB? This would be required if we
-        %% TODO: tried to distribute the commitments in a p2p manner
-        auth_data = <<>> :: binary()
-    }).
-
--type commitment_header() :: #hc_commitment_header{}.
+        , hash/1]).
 -export_type([commitment_header/0]).
 
--spec new(commiter_pubkey(), block_header_hash()) -> commitment_header().
+-include_lib("aehyperchains/include/aehc_types.hrl").
+
+-record(hc_commitment_header, {
+    %% Delegate who submitted the commitment
+    hc_delegate = <<0:?COMMITTER_PUB_BYTES/unit:8>> :: committer_pubkey(),
+    %% Hyperchain keyblock to which the delegate committed
+    hc_keyblock = <<0:?BLOCK_HEADER_HASH_BYTES/unit:8>> :: block_header_hash(),
+    %% Hash of PoGF object
+    hc_pogf_hash = <<0:?POGF_HASH_BYTES>> :: pogf_hash(),
+
+    %% Connector specific authorization data proving that the given delegate
+    %% submitted the commitment. In the friendly case of an AE parent chain
+    %% this could include the parent chain tx which includes the above data
+    %% TODO: Should this be included in the DB? This would be required if we
+    %% TODO: tried to distribute the commitments in a p2p manner
+    auth_data = <<>> :: binary()
+}).
+-opaque commitment_header() :: #hc_commitment_header{}.
+
+
+%% API
+
+-spec new(committer_pubkey(), block_header_hash()) -> commitment_header().
 new(Delegate, KeyblockHash) ->
     new(Delegate, KeyblockHash, aehc_pogf:hash(no_pogf)).
 
--spec new(commiter_pubkey(), block_header_hash(), pogf_hash()) -> commitment_header().
+-spec new(committer_pubkey(), block_header_hash(), pogf_hash()) ->
+    commitment_header().
 new(Delegate, KeyblockHash, PoGFHash) ->
-    #hc_commitment_header{ hc_delegate = Delegate
-                         , hc_keyblock = KeyblockHash
-                         , hc_pogf_hash = PoGFHash }.
+    #hc_commitment_header{
+        hc_delegate = Delegate
+        , hc_keyblock = KeyblockHash
+        , hc_pogf_hash = PoGFHash
+    }.
 
--spec from_db(tuple()) -> commitment_header().
+-spec from_db(commitment_header()) -> commitment_header().
 from_db(#hc_commitment_header{} = Header) -> Header.
 
 -spec set_auth_data(commitment_header(), binary()) -> commitment_header().
@@ -75,7 +77,7 @@ set_auth_data(CommitmentHeader, AuthData) ->
 set_pogf_hash(CommitmentHeader, PoGFHash) ->
     CommitmentHeader#hc_commitment_header{hc_pogf_hash = PoGFHash}.
 
--spec hc_delegate(commitment_header()) -> commiter_pubkey().
+-spec hc_delegate(commitment_header()) -> committer_pubkey().
 hc_delegate(CommitmentHeader) ->
     CommitmentHeader#hc_commitment_header.hc_delegate.
 
@@ -88,7 +90,8 @@ hc_pogf_hash(CommitmentHeader) ->
     CommitmentHeader#hc_commitment_header.hc_pogf_hash.
 
 -spec hash(commitment_header()) -> commitment_hash().
-hash(#hc_commitment_header{ hc_delegate = Delegate
-                          , hc_keyblock = Keyblock
-                          , hc_pogf_hash = PoGFHash }) ->
-    aec_hash:hash(hc_commitment, <<Delegate/binary, Keyblock/binary, PoGFHash/binary>>).
+hash(#hc_commitment_header{
+    hc_delegate = D
+    , hc_keyblock = K
+    , hc_pogf_hash = H}) ->
+    aec_hash:hash(hc_commitment, <<D/binary, K/binary, H/binary>>).

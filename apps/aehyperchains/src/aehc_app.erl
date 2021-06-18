@@ -11,6 +11,9 @@
 
 -export([trackers_config/0, tracker_name/1, tracker_note/1]).
 
+
+%% API
+
 start(_StartType, _StartArgs) ->
     Res = aehc_sup:start_link(),
     case aehc_utils:hc_enabled() of
