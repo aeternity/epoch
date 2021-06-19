@@ -543,6 +543,7 @@ paths:
           content:
             application/json:
               schema:
+                $ref: "#/components/schemas/Error"
   /dry-run:
     post:
       tags:
@@ -571,7 +572,6 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
                 $ref: "#/components/schemas/Error"
   "/transactions/{hash}":
     get:
