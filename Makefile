@@ -52,7 +52,7 @@ all:	local-build
 
 endpoints: VERSION
 	$(REBAR) swagger_endpoints
-	$(REBAR) swagger_endpoints --file=$(OAS_YAML) --out=$(OAS_ENDPOINTS_SPEC) 
+	$(REBAR) swagger_endpoints --file=$(OAS_YAML) --out=$(OAS_ENDPOINTS_SPEC)
 
 null  :=
 space := $(null) # space
@@ -103,7 +103,7 @@ endif
 export AEVM_EXTERNAL_TEST_DIR=aevm_external
 export AEVM_EXTERNAL_TEST_VERSION=348b0633f4a6ee3c100368bf0f4fca71394b4d01
 
-console: VERSION REVISION endpoints 
+console: VERSION REVISION endpoints
 	@$(REBAR) as local shell --config config/dev.config --sname aeternity@localhost
 
 hyperchains-console: $(SWAGGER_ENDPOINTS_SPEC)
@@ -228,7 +228,7 @@ dialyzer-install: endpoints
 	@$(REBAR) tree
 	@$(REBAR) dialyzer -u true -s false
 
-dialyzer: endpoints 
+dialyzer: endpoints
 	@$(REBAR) dialyzer
 
 edoc: VERSION
@@ -415,7 +415,7 @@ multi-build: VERSION dev1-build
 # Build rules
 #
 
-internal-compile-deps: hc-compile-staking-contract
+internal-compile-deps:
 	@$(REBAR) as $(KIND) compile -d
 
 internal-package: VERSION REVISION internal-compile-deps endpoints
@@ -477,9 +477,6 @@ test-arch-os-dependencies: KIND=test
 test-arch-os-dependencies:
 	make ct-latest SUITE=apps/aecontract/test/aecontract GROUP=sophia TEST=sophia_crypto
 
-hc-compile-staking-contract:
-	./rebar3 aesophia -s v4.3.1 -c ./apps/aehyperchains/src/contracts/SimpleElection.aes -o ./data/aehyperchains/StakingContract.json
-
 # TODO: Verify release packages
 hc-verify-staking-contract:
 	./rebar3 aesophia -s v4.3.1 -c ./apps/aehyperchains/src/contracts/SimpleElection.aes -o ./data/aehyperchains/StakingContract.json -v
@@ -508,4 +505,4 @@ hc-verify-staking-contract:
 	VERSION \
 	prod-deb-package \
 	regen-fate \
-	hc-compile-staking-contract hc-verify-staking-contract
+	hc-verify-staking-contract
