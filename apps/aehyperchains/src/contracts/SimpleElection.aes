@@ -36,11 +36,11 @@ contract SimpleElection =
    * General variables and configurations
    * - deposit_delay: how much does it take for the staked tokens to
    *   provide the voting power
-   * - stake_retraction_delay: how long should the tokens provide voting 
+   * - stake_retraction_delay: how long should the tokens provide voting
    *   power after the delegate has requested to withdraw them
    * - withdraw_delay: after what period of time are the tokens eligible
    *   to be withdrawn after delegate's request
-   * 
+   *
    * Should satisfy withdraw_delay >= stake_retraction_delay
    */
   record config = {
@@ -56,7 +56,7 @@ contract SimpleElection =
     address : delegate,
     power   : int }
 
-  
+
   /**
    * Description of the election result on a given block height
    */
@@ -71,7 +71,7 @@ contract SimpleElection =
    * - withdraw_requests: list of all withdrawal requests for each delegate'
    * - last_election: hypothetical information about the most recent election.
    *   Should set to None initially and updated with each election
-   * - config: overall tweaks of the election/staking rules 
+   * - config: overall tweaks of the election/staking rules
    */
   record state = {
     stakes : map(delegate, list(stake)),
@@ -122,8 +122,8 @@ contract SimpleElection =
       { deposit_delay          = 5,
         stake_retraction_delay = 5,
         withdraw_delay         = 10 }
-      
-  
+
+
 
   /**
    * Constant that defines range of hashes
@@ -181,7 +181,7 @@ contract SimpleElection =
    * Calculates the voting power of a stake entry
    */
   function
-    valuate : stake => int  
+    valuate : stake => int
     valuate(s) =
       let age = Chain.block_height - s.created
       if(age >= state.config.deposit_delay) s.value + age^2
@@ -192,7 +192,7 @@ contract SimpleElection =
    * Get total of staked tokens of a delegate
    */
   entrypoint
-    staked_tokens : delegate => tokens 
+    staked_tokens : delegate => tokens
     staked_tokens(address) =
       List.sum([s.value | s <- state.stakes[address = []]])
 
@@ -201,7 +201,7 @@ contract SimpleElection =
    * Get total number of tokens that a delegate requested to thaw
    */
   entrypoint
-    requested_withdrawals : delegate => tokens 
+    requested_withdrawals : delegate => tokens
     requested_withdrawals(address) =
       List.sum([w.value | w <- state.withdraw_requests[address = []]])
 
@@ -213,7 +213,7 @@ contract SimpleElection =
   entrypoint
     retracted_stake : delegate => tokens
     retracted_stake(address) =
-      List.sum([ w.value 
+      List.sum([ w.value
                | w <- state.withdraw_requests[address = []]
                , if(Chain.block_height >=
                     w.created + state.config.stake_retraction_delay)
@@ -226,7 +226,7 @@ contract SimpleElection =
    */
   function
     extract_ripe_withdrawals : list(withdraw_request) =>
-                               (tokens * list(withdraw_request)) 
+                               (tokens * list(withdraw_request))
     extract_ripe_withdrawals([]) = (0, [])
     extract_ripe_withdrawals(w::t) =
       let (tokens, rest) = extract_ripe_withdrawals(t)
@@ -236,7 +236,7 @@ contract SimpleElection =
       else
         // We leave it
         (tokens, w::rest)
-  
+
 
   /**
    * Drops the least valuable tokens from the stake entries
@@ -257,7 +257,7 @@ contract SimpleElection =
   /**
    * Calculates the voting power of a delegate
    */
-  function 
+  function
     voting_power : delegate => int
     voting_power(address) =
       let retracted_stake = retracted_stake(address)
@@ -270,7 +270,7 @@ contract SimpleElection =
    * from the state
    */
   function
-    get_candidates : list(delegate) => list(candidate) 
+    get_candidates : list(delegate) => list(candidate)
     get_candidates(delegates) =
       let is_considered(d : delegate) =
         List.find((x) => x == d, delegates) != None
@@ -285,7 +285,7 @@ contract SimpleElection =
   /**
    * Ordering on candidates
    */
-  function 
+  function
     candidate_cmp : (candidate, candidate) => bool
     candidate_cmp(c1, c2) =
       if(c1.power == c2.power) c1.address < c2.address
@@ -296,7 +296,7 @@ contract SimpleElection =
    * Extracts the chosen leader from the delegates list
    */
   function
-    choose_by_power : (list(candidate), int) => option(delegate) 
+    choose_by_power : (list(candidate), int) => option(delegate)
     choose_by_power(delegates, shot) =
       switch(delegates)
         []   => None
@@ -332,7 +332,7 @@ contract SimpleElection =
   /**
    * Updates the entry of the last election result
    */
-  stateful function 
+  stateful function
     set_leader : delegate => unit
     set_leader(addr) =
       put(state{
@@ -372,7 +372,7 @@ contract SimpleElection =
   /**
    * Registers withdrawal request
    */
-  stateful entrypoint 
+  stateful entrypoint
     request_withdraw : tokens => unit
     request_withdraw(amount) =
       let caller = Call.origin
@@ -397,12 +397,12 @@ contract SimpleElection =
       let caller = Call.origin
       let (total_value, new_withdrawals) =
         extract_ripe_withdrawals(state.withdraw_requests[caller])
-      
+
       put(state{
-        stakes[caller] @ stakes = decrease_stake(stakes, total_value), 
+        stakes[caller] @ stakes = decrease_stake(stakes, total_value),
         withdraw_requests[caller] = new_withdrawals})
       Chain.spend(caller, total_value)
-      
+
       total_value
 
 
@@ -418,7 +418,7 @@ contract SimpleElection =
 
       switch(get_computed_leader())
         Some(le) => le
-        None => 
+        None =>
           let candidates = get_candidates(delegates)
           switch (elect_candidate(candidates, rand))
             // if the election fails then pick the previous one

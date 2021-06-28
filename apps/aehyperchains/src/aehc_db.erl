@@ -11,8 +11,10 @@ create_tables(Mode) ->
         true ->
             AllSpecs = all_specs(Mode),
             Specs = lists:flatten([proplists:lookup(Table, AllSpecs) || {missing_table, Table} <- check_tables([])]),
+
             [{atomic, ok} = mnesia:create_table(Tab, Spec) || {Tab, Spec} <- Specs];
         false ->
+            lager:info("~nHC is disabled ~p~n",[?LINE]),
             []
     end.
 

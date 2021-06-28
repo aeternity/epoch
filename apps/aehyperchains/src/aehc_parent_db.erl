@@ -10,14 +10,23 @@
 
 %% API
 -export([ get_commitment/1
-        , get_parent_top_block/1
         , get_parent_block/1
+        , get_parent_blocks/2
         , get_candidates_in_election_cycle/2
-        , write_parent_block/1
+        , write_parent_block/2
+        , find_parent_block/1
         ]).
 
--export([ write_parent_chain_view/2
-        , get_parent_chain_view/1
+-export([ write_parent_state/2
+        , get_parent_state/1
+        ]).
+
+-export([ get_parent_block_state/1
+        , write_parent_block_state/2
+        ]).
+
+-export([ find_delegates_node/1
+        , write_delegates_node/2
         ]).
 
 -export([
@@ -35,18 +44,16 @@
 -define(t(Expr, ErrorKeys), aec_db:ensure_transaction(fun() -> Expr end, ErrorKeys)).
 
 -include("../../aecore/include/blocks.hrl").
+-include("aehc_parent_db.hrl").
 -include("aehc_utils.hrl").
-
--record(hc_db_pogf, {key, value}).
--record(hc_db_commitment_header, {key, value}).
--record(hc_db_parent_block_header, {key, value}).
--record(hc_db_parent_chain_view, {key, value}).
 
 table_specs(Mode) ->
     [ ?TAB(hc_db_pogf)
     , ?TAB(hc_db_commitment_header)
     , ?TAB(hc_db_parent_block_header)
-    , ?TAB(hc_db_parent_chain_view)
+    , ?TAB(hc_db_parent_block_state)
+    , ?TAB(hc_db_parent_state)
+    , ?TAB(hc_db_delegate_state)
     ].
 
 check_tables(Acc) ->
@@ -55,47 +62,92 @@ check_tables(Acc) ->
               aec_db:check_table(Tab, Spec, Acc1)
       end, Acc, table_specs(disc)).
 
+%%%===================================================================
+%%% API
+%%%===================================================================
+
 -spec get_commitment(commitment_hash()) -> aehc_commitment:commitment().
 get_commitment(CommitmentHash) ->
     NoFraud = aehc_pogf:hash(no_pogf),
     ?t(begin
        [#hc_db_commitment_header{value = DBCommitmentHeader}]
-           = mnesia:read(hc_db_commitment_header, CommitmentHash),
+           = get_commitment_header(CommitmentHash),
        CommitmentHeader = aehc_commitment_header:from_db(DBCommitmentHeader),
        case aehc_commitment_header:hc_pogf_hash(CommitmentHeader) of
             NoFraud ->
                 aehc_commitment:new(CommitmentHeader, no_pogf);
             PoGFHash ->
-                [#hc_db_pogf{value = DBPoGF}] = mnesia:read(hc_db_pogf, PoGFHash),
+                [#hc_db_pogf{value = DBPoGF}] = get_pogf(PoGFHash),
                 aehc_commitment:new(CommitmentHeader, aehc_pogf:from_db(DBPoGF))
        end
     end).
 
 -spec get_parent_block(binary()) -> aehc_parent_block:parent_block().
 get_parent_block(ParentBlockHash) ->
-    NoFraud = aehc_pogf:hash(no_pogf),
     ?t(begin
            [#hc_db_parent_block_header{value = DBParentHeader}]
-                = mnesia:read(hc_db_parent_block_header, ParentBlockHash),
+                = get_parent_header(ParentBlockHash),
            ParentBlockHeader = aehc_parent_block:header_from_db(DBParentHeader),
            CommitmentHashes = aehc_parent_block:commitment_hashes(ParentBlockHeader),
-           Commitments = [begin
-                              [#hc_db_commitment_header{value = DBCommitmentHeader}]
-                                  = mnesia:read(hc_db_commitment_header, CommitmentHash),
-                              CommitmentHeader =
-                                  aehc_commitment_header:from_db(DBCommitmentHeader),
-                              case aehc_commitment_header:hc_pogf_hash(CommitmentHeader) of
-                                  NoFraud ->
-                                      aehc_commitment:new(CommitmentHeader, no_pogf);
-                                  PoGFHash ->
-                                      [#hc_db_pogf{value = DBPoGF}]
-                                          = mnesia:read(hc_db_pogf, PoGFHash),
-                                      PoGFF = aehc_pogf:from_db(DBPoGF),
-                                      aehc_commitment:new(CommitmentHeader, PoGFF)
-                              end
-                          end || CommitmentHash <- CommitmentHashes],
+           Commitments = get_commitments(CommitmentHashes),
+
            aehc_parent_block:new_block(ParentBlockHeader, Commitments)
     end).
+
+-spec find_parent_block(binary()) -> 'none' | {'value', aehc_parent_block:parent_block()}.
+find_parent_block(ParentBlockHash) ->
+    ?t(case get_parent_header(ParentBlockHash) of
+           [#hc_db_parent_block_header{value = DBParentHeader}] ->
+               ParentBlockHeader = aehc_parent_block:header_from_db(DBParentHeader),
+               CommitmentHashes = aehc_parent_block:commitment_hashes(ParentBlockHeader),
+               Commitments = get_commitments(CommitmentHashes),
+
+               aehc_parent_block:new_block(ParentBlockHeader, Commitments);
+           [] ->
+               none
+       end).
+
+get_parent_header(ParentBlockHash) ->
+    mnesia:read(hc_db_parent_block_header, ParentBlockHash).
+
+get_commitment_header(CommitmentHash) ->
+    mnesia:read(hc_db_commitment_header, CommitmentHash).
+
+get_pogf(PoGFHash) ->
+    mnesia:read(hc_db_pogf, PoGFHash).
+
+get_commitments(CommitmentHashes) ->
+    NoFraud = aehc_pogf:hash(no_pogf),
+    [begin
+         [#hc_db_commitment_header{value = DBCommitmentHeader}]
+             = get_commitment_header(CommitmentHash),
+         CommitmentHeader =
+             aehc_commitment_header:from_db(DBCommitmentHeader),
+         case aehc_commitment_header:hc_pogf_hash(CommitmentHeader) of
+             NoFraud ->
+                 aehc_commitment:new(CommitmentHeader, no_pogf);
+             PoGFHash ->
+                 [#hc_db_pogf{value = DBPoGF}]
+                     = get_pogf(PoGFHash),
+                 PoGFF = aehc_pogf:from_db(DBPoGF),
+                 aehc_commitment:new(CommitmentHeader, PoGFF)
+         end
+     end || CommitmentHash <- CommitmentHashes].
+
+-spec get_parent_blocks(non_neg_integer(), binary()) -> [aehc_parent_block:aehc_parent_block()].
+get_parent_blocks(Height, Hash) ->
+    get_parent_blocks(Hash, [], Height).
+
+get_parent_blocks(_Hash, Acc, 0) ->
+    Acc;
+get_parent_blocks(Hash, Acc, Height) ->
+    Block = get_parent_block(Hash),
+    case aehc_parent_block:prev_hash_block(Block) of
+        Hash ->
+            Acc;
+        PrevHash ->
+            get_parent_blocks(PrevHash, [Block|Acc], Height - 1)
+    end.
 
 -spec get_candidates_in_election_cycle(non_neg_integer(), binary()) -> [aehc_commitment:commitment()].
 get_candidates_in_election_cycle(_Height, ParentBlockHash) ->
@@ -127,47 +179,94 @@ get_candidates_in_election_cycle_(ParentBlockHash, Acc, N) ->
             get_candidates_in_election_cycle_(PrevHash, [Candidates | Acc], N-1)
     end.
 
-write_parent_block(ParentBlock) ->
+%%% Block record
+
+-spec write_parent_block(aehc_parent_block:parent_block(), aehc_parent_trees:trees()) -> ok.
+write_parent_block(ParentBlock, Trees) ->
+    ?t(begin
+           [
+               ok = Fun(ParentBlock)|| Fun <- [ fun write_parent_block_header/1
+                                              , fun write_commitments/1
+                                              , fun write_pogf/1
+                                              ]
+           ],
+           ok = write_parent_block_state(ParentBlock, Trees)
+       end
+    ).
+
+write_parent_block_header(ParentBlock) ->
     ParentBlockHeader = aehc_parent_block:block_header(ParentBlock),
     DBHeader = #hc_db_parent_block_header{ key = aehc_parent_block:hash_block(ParentBlock)
-                                         , value = ParentBlockHeader
-                                         },
+        , value = ParentBlockHeader
+    },
+    mnesia:write(DBHeader).
+
+write_commitments(ParentBlock) ->
+    ParentBlockHeader = aehc_parent_block:block_header(ParentBlock),
     Commitments = aehc_parent_block:commitments_in_block(ParentBlock),
     CommitmentHashes = aehc_parent_block:commitment_hashes(ParentBlockHeader),
     DBCommitments = lists:map(
         fun({K,V}) ->
             #hc_db_commitment_header{key = K, value = aehc_commitment:header(V)}
         end, lists:zip(CommitmentHashes, Commitments)),
+    [ok = mnesia:write(DBCommitment) || DBCommitment <- DBCommitments],
+    ok.
+
+write_pogf(ParentBlock) ->
+    Commitments = aehc_parent_block:commitments_in_block(ParentBlock),
     DBPoGFs = lists:filtermap(
         fun(El) ->
             aehc_commitment:has_pogf(El) andalso
                 {true, #hc_db_pogf{ key = aehc_commitment:pogf_hash(El)
-                                  , value = aehc_commitment:pogf(El)
-                                  }}
+                    , value = aehc_commitment:pogf(El)
+                }}
         end, Commitments),
+    [ok = mnesia:write(DBPoGF) || DBPoGF <- DBPoGFs],
+    ok.
+
+write_parent_block_state(ParentBlock, Trees) ->
+
+    Hash = aehc_parent_block:hash_block(ParentBlock),
+    Trees2 = aehc_parent_trees:serialize_for_db(aehc_parent_trees:commit_to_db(Trees)),
+    ParentBlockState = #hc_db_parent_block_state{ key = Hash, value = Trees2 },
+    mnesia:write(ParentBlockState).
+
+get_parent_block_state(Hash) ->
     ?t(begin
-           mnesia:write(DBHeader),
-           [mnesia:write(DBCommitment) || DBCommitment <- DBCommitments],
-           [mnesia:write(DBPoGF) || DBPoGF <- DBPoGFs]
+           [#hc_db_parent_block_state{value = Trees}] =
+               mnesia:read(hc_db_parent_block_state, Hash),
+           aehc_parent_trees:deserialize_from_db(Trees)
        end).
 
-%% This entry determines traversing path within the current db log (the current range between genesis and top);
--spec write_parent_chain_view(binary(), binary()) -> ok.
-write_parent_chain_view(GenesisHash, TopHash) when is_binary(GenesisHash),
-                                                    is_binary(TopHash) ->
-    ?t(mnesia:write(#hc_db_parent_chain_view{key = GenesisHash, value = TopHash}),
-        [{hc_db_parent_chain_view, GenesisHash}]).
+%%%===================================================================
+%%% Chain state API
+%%%===================================================================
 
--spec get_parent_chain_view(binary()) -> binary() | undefined.
-get_parent_chain_view(GenesisHash) ->
-    ?t(case mnesia:read(hc_db_parent_chain_view, GenesisHash) of
-           [#hc_db_parent_chain_view{value = Value}] ->
+-spec get_parent_state(binary()) -> aehc_parent_state:parent_state() | undefined.
+get_parent_state(Pointer) ->
+    ?t(case mnesia:read(hc_db_parent_state, Pointer) of
+           [#hc_db_parent_state{value = Value}] ->
                Value;
            _ ->
                undefined
        end).
 
-%% Get the parent tob block of a particular parent view;
--spec get_parent_top_block(binary()) -> aehc_parent_block:parent_block() | undefined.
-get_parent_top_block(GenesisHash) ->
-    ?t(get_parent_block(get_parent_chain_view(GenesisHash))).
+-spec write_parent_state(binary(), aehc_parent_state:parent_state()) -> ok.
+write_parent_state(Pointer, ParentState) ->
+    ?t(mnesia:write(#hc_db_parent_state{key = Pointer, value = ParentState}),
+        []).
+
+%%%===================================================================
+%%% State trees API
+%%%===================================================================
+
+find_delegates_node(Hash) ->
+    case ?t(mnesia:read(hc_db_delegate_state, Hash)) of
+        [#hc_db_delegate_state{value = Node}] -> {value, Node};
+        [] -> none
+    end.
+
+write_delegates_node(Hash, Node) ->
+    ?t(mnesia:write(#hc_db_delegate_state{key = Hash, value = Node}),
+        [{hc_db_delegate_state, Hash}]).
+%% TODO TO initiate parent genesis with trees

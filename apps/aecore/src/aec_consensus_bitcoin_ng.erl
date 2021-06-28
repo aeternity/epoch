@@ -53,7 +53,8 @@
         %% Block target and difficulty
         , default_target/0
         , assert_key_target_range/1
-        , key_header_difficulty/1 ]).
+        , key_header_difficulty/1
+        , keyblocks_for_target_calc/0 ]).
 
 -ifdef(TEST).
 -export([load_whitelist/0]).
@@ -377,6 +378,7 @@ new_unmined_key_node(PrevNode, PrevKeyNode, Height, Miner, Beneficiary, Protocol
 
 keyblocks_for_unmined_keyblock_adjust() ->
     aec_governance:key_blocks_to_check_difficulty_count().
+
 adjust_unmined_keyblock(Block, AdjHeaders) ->
     Header = aec_blocks:to_header(Block),
     DeltaHeight = aec_governance:key_blocks_to_check_difficulty_count() + 1,
@@ -446,3 +448,6 @@ key_header_difficulty(Header) ->
 load_whitelist() ->
     W = aec_fork_block_settings:block_whitelist(),
     persistent_term:put(?WHITELIST, W).
+
+keyblocks_for_target_calc() ->
+    1.

@@ -26,7 +26,8 @@ SWAGGER_ENDPOINTS_SPEC = apps/aeutils/src/endpoints.erl
 OAS_ENDPOINTS_SPEC = apps/aeutils/src/oas_endpoints.erl
 OAS_YAML = apps/aehttp/priv/oas3.yaml
 
-CONTRACT_FILE = SimpleElection.aes
+CONTRACT_FILE = apps/aehyperchains/src/contracts/SimpleElection.aes
+#CONTRACT_FILE = SimpleElection.aes
 CONTRACT_OBJECT = data/aehyperchains/StakingContract.json
 
 PACKAGE_SPEC_WIN32 ?= ../.circleci/windows/package.cfg
@@ -478,11 +479,11 @@ test-arch-os-dependencies:
 	make ct-latest SUITE=apps/aecontract/test/aecontract GROUP=sophia TEST=sophia_crypto
 
 hc-compile-staking-contract:
-	./rebar3 aesophia -s v4.3.1 -c ./apps/aehyperchains/src/contracts/SimpleElection.aes -o ./data/aehyperchains/StakingContract.json
+	./rebar3 aesophia -s v4.3.1 -c $(CONTRACT_FILE) -o $(CONTRACT_OBJECT)
 
 # TODO: Verify release packages
 hc-verify-staking-contract:
-	./rebar3 aesophia -s v4.3.1 -c ./apps/aehyperchains/src/contracts/SimpleElection.aes -o ./data/aehyperchains/StakingContract.json -v
+	./rebar3 aesophia -s v4.3.1 -c $(CONTRACT_FILE) -o $(CONTRACT_OBJECT) -v
 
 .PHONY: \
 	all console hyperchains-console \

@@ -2,26 +2,32 @@
 %%%-------------------------------------------------------------------
 %%% @copyright (C) 2020, Aeternity Anstalt
 %%% @doc
-%%% <h3>Hyperchains parent's process manager</h3>
-%%% See the pattern "ProcessManager" (https://www.enterpriseintegrationpatterns.com/patterns/messaging/ProcessManager.html).
-%%% This component is responsible for orchestration the abstract parent's chain layer through:
-%%%  a) dedicated workers (trackers);
-%%%  b) supplied interface providers (connectors);
-%%% - The first configured view acts as the "master view" and is eligible to dictate the election period through event's announcement;
-%%% - A tracker performs synchronization from the highest known block until genesis pointer through "previous_hash" property;
-%%% - To be able to run the Hyperchains the system must satisfy the connector's acceptance criteria;
-%%%     a) default mode: get_top_block/0, get_block_by_hash/1l
-%%%     b) delegate mode: default mode + dry_send_tx/1;
-%%% - Interested developers can develop their own connectors for a particular parent chain;
-%%% (TODO: To supply link to the official connector's development guide);
+%% Parent chains process manager
+%% This component is responsible for orchestration of the Hyperchains backend (parent chain) through:
+%% - dedicated state machine (tracker);
+%% - blockchain interface (https://github.com/aeternity/aeconnector/wiki);
+%% The component traverses parent chain data in lazy evaluation mode (on demand)
+%% TODO: To provide HTTP API for scheduled commitments
+%% TODO: To show dialog about registry record (show notify + address in telegram, throw error on commitment)
+%% Used patterns:
+%% - https://www.enterpriseintegrationpatterns.com/patterns/messaging/ProcessManager.html)
 %%% @end
 %%%-------------------------------------------------------------------
 -module(aehc_parent_mng).
+
+-include("../../aecore/include/blocks.hrl").
+-include("aehc_utils.hrl").
 
 -behaviour(gen_server).
 
 %% API.
 -export([start_link/0]).
+
+-export([commit/1, register/1]).
+-export([get_block_by_hash/1]).
+-export([push/1, pop/0]).
+
+-export([stop/0]).
 
 %% gen_server.
 -export([init/1]).
@@ -30,72 +36,143 @@
 -export([handle_info/2]).
 -export([terminate/2]).
 
--export([start_view/2, terminate_view/1]).
--export([publish_block/2]).
+-type parent_block() :: aehc_parent_block:parent_block().
+-type commitment() ::  aehc_commitment:commitment().
 
--include_lib("aeutils/include/aeu_stacktrace.hrl").
+-type trees() :: aehc_parent_trees:trees().
+
+-type pubkey() :: aec_keys:pubkey().
+
 %% API.
 
 -spec start_link() ->
     {ok, pid()} | ignore | {error, term()}.
 start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+    State = state(),
+    gen_server:start_link({local, ?MODULE}, ?MODULE, State, []).
 
--spec start_view(term(), map()) -> {ok, pid()}.
-start_view(Name, Conf) ->
-    gen_server:call(?MODULE, {start_view, Name, Conf}).
+-spec commit(commitment()) -> ok.
+commit(Commitment) ->
+    gen_server:call(?MODULE, {commit, Commitment}).
 
--spec terminate_view(term()) -> ok.
-terminate_view(Name) ->
-    gen_server:call(?MODULE, {terminate_view, Name}).
+-spec get_block_by_hash(binary()) -> {ok, parent_block(), trees()} | {error, term()}.
+get_block_by_hash(Hash) ->
+    gen_server:call(?MODULE, {get_block_by_hash, Hash}).
 
-%% This event issued each time by connector when the new block is generated;
--spec publish_block(term(), aehc_parent_block:parent_block()) -> ok.
-publish_block(View, Block) ->
-    erlang:send(?MODULE, {publish_block, View, Block}),
-    ok.
+%% To extract the block from a queue (FIFO)
+-spec pop() -> {value, parent_block()} | empty.
+pop() ->
+    gen_server:call(?MODULE, {pop}).
+
+-spec push(parent_block()) -> ok.
+push(Block) ->
+    gen_server:cast(?MODULE, {push, Block}).
+
+-spec register(binary()) -> ok.
+register(PubKey) ->
+    gen_server:call(?MODULE, {register, PubKey}).
+
+-spec stop() -> ok.
+stop() ->
+    gen_server:stop(?MODULE).
 
 %%%===================================================================
 %%%  gen_server behaviour
 %%%===================================================================
 
--record(state, { master :: term(), trackers :: list() }).
-init([]) ->
+-record(state, {
+    pid :: term(),
+    ref :: term(),
+    %% FIFO queue of scheduled parent blocks to process
+    queue::term()
+}).
+
+-type state() :: #state{}.
+
+init(State) ->
     process_flag(trap_exit, true),
-    %% Read configuration;
-    Trackers = [aehc_app:tracker_name(Tracker) || Tracker <- aehc_app:trackers_config()],
-    [Master|_] = Trackers,
-    {ok, #state{ master = Master, trackers = Trackers }}.
 
-handle_call({start_view, View, Conf}, _From, State) ->
-    Res = aehc_sup:start_view(View, Conf),
-    lager:info("~p start parent view: ~p (~p)", [View, aehc_app:tracker_name(Conf)]),
-    {reply, Res, State};
+    Opt = [user_config, schema_default],
+    {ok, Tracker} = aeu_env:find_config([<<"hyperchains">>, <<"tracker">>], Opt),
 
-handle_call({terminate_view, View}, _From, State) ->
-    Res = aehc_sup:terminate_view(View),
-    lager:info("~p terminate parent view: ~p", [View]),
-    {reply, Res, State}.
+    {ok, Pid} = aehc_parent_tracker:start(Tracker), Ref = erlang:monitor(process, Pid),
+
+    State2 = State#state{ pid = Pid, ref = Ref },
+    {ok, State2}.
+
+handle_call({pop}, _From, State) ->
+
+    {Res, State2} = out(State),
+    {reply, Res, State2};
+
+handle_call({commit, Commitment}, From, State) ->
+    Pid = State#state.pid,
+    Payload = aehc_parent_data:commitment(Commitment),
+
+    ok = aehc_parent_tracker:send_tx(Pid, Payload, From),
+    {noreply, State};
+
+handle_call({get_block_by_hash, Hash}, From, State) ->
+    Pid = State#state.pid,
+
+    ok = aehc_parent_tracker:get_block_by_hash(Pid, Hash, From),
+    {noreply, State};
+
+handle_call({register, PubKey}, From, State) ->
+    Pid = State#state.pid,
+    Payload = aehc_parent_data:delegate(PubKey),
+
+    ok = aehc_parent_tracker:send_tx(Pid, Payload, From),
+    {noreply, State};
+
+handle_call(_Request, _From, State) ->
+    {reply, ignored, State}.
+
+handle_cast({push, Block}, State) ->
+    Hash = aehc_parent_block:hash_block(Block),
+    State2 = in(Block, State),
+
+    ok = aec_events:publish(parent_top_changed, Hash),
+    {noreply, State2};
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info({publish_block, View, Block}, #state{} = State) ->
-    %% To be able to persists the block we have to be sure that it connects to the previous existing one in the DB;
-    %% That guaranties sequential order and consistency of the current chain view;
-    %% Check that condition each time when block arrived allows to skip the whole chain traversing procedure;
-    try
-        true = aehc_parent_block:is_hc_parent_block(Block),
-        %% %% Fork synchronization by by the new arrived block;
-        aehc_parent_tracker:publish_block(View, Block)
-    catch E:R:StackTrace ->
-        lager:error("CRASH: ~p; ~p", [E, StackTrace]),
-        {error, E, R}
-    end,
-    {noreply, State};
-
-handle_info(_Info, State) ->
+handle_info(_Message, State) ->
     {noreply, State}.
 
-terminate(_Reason, _State) ->
-    ok.
+terminate(_Reason, State) ->
+    Pid = State#state.pid,
+    ok = aehc_parent_tracker:stop(Pid).
+
+%%%===================================================================
+%%%  Data access layer
+%%%===================================================================
+
+-spec state() -> state().
+state() ->
+    #state{ queue = queue:new() }.
+
+-spec queue(state()) -> term().
+queue(State) ->
+    State#state.queue.
+
+-spec queue(state(), term()) -> state().
+queue(State, Queue) ->
+    State#state{ queue = Queue }.
+
+-spec in(term(), state()) -> state().
+in(Item, State) ->
+    Queue2 = queue:in(Item, queue(State)),
+    queue(State, Queue2).
+
+-spec out(state()) -> {{value, term()}, state()} | {empty, state()}.
+out(State) ->
+    Queue = queue(State),
+    case queue:out(Queue) of
+        {Res = {value, _Item}, Queue2} ->
+            Data2 = queue(State, Queue2),
+            {Res, Data2};
+        {Res = empty, _Queue2} ->
+            {Res, State}
+    end.

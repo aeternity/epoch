@@ -9,17 +9,8 @@
         , check_env/0
         ]).
 
--export([trackers_config/0, tracker_name/1, tracker_note/1]).
-
 start(_StartType, _StartArgs) ->
-    Res = aehc_sup:start_link(),
-    case aehc_utils:hc_enabled() of
-        true ->
-            [aehc_parent_mng:start_view(tracker_name(Conf), Conf) || Conf <- trackers_config()];
-        false ->
-            ok
-    end,
-    Res.
+    ok.
 
 start_phase(_Phase, _StartType, _PhaseArgs) ->
     ok.
@@ -31,24 +22,22 @@ stop(_State) ->
     ok.
 
 check_env() ->
-    case aehc_utils:hc_enabled() of
-        true ->
-            lager:info("Hyperchains are enabled");
-        false ->
-            lager:info("Hyperchains are disabled"),
-            ok
-    end.
+    check_env([{[<<"chain">>, <<"hyperchains">>, <<"enabled">>], {set_env, enabled}}]),
+    aehc_utils:hc_enabled() andalso lager:info("Hyperchains is enabled"),
+    ok.
 
--spec trackers_config() -> nonempty_list(map()).
-trackers_config() ->
-    {ok, Trackers} = aeu_env:find_config([<<"hyperchains">>, <<"trackers">>],
-        [user_config, schema_default, {env, aehyperchains, [hyperchains, trackers]}]),
-    Trackers.
+check_env(Spec) ->
+    lists:foreach(
+      fun({K, F}) ->
+              case aeu_env:user_config(K) of
+                  undefined -> ignore;
+                  {ok, V}   -> set_env(F, V)
+              end
+      end, Spec).
 
--spec tracker_name(map()) -> term().
-tracker_name(Conf) ->
-    maps:get(<<"name">>, Conf).
+set_env({set_env, K}, V) when is_atom(K) ->
+    io:fwrite("setenv K=~p, V=~p~n", [K, V]),
+    application:set_env(aehyperchains, K, V);
+set_env(F, V) when is_function(F, 1) ->
+    F(V).
 
--spec tracker_note(map()) -> term().
-tracker_note(Conf) ->
-    maps:get(<<"note">>, Conf).

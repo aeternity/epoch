@@ -36,7 +36,11 @@ start_phase(create_metrics_probes, _StartType, _PhaseArgs) ->
 start_phase(start_reporters, _StartType, _PhaseArgs) ->
     lager:debug("start_phase(start_reporters, _, _)", []),
     aec_metrics_rpt_dest:check_config(),
-    aec_metrics:start_reporters().
+    aec_metrics:start_reporters();
+start_phase(register_delegate, _StartType, _PhaseArgs) ->
+    %% Delegate registry procedure
+    lager:debug("start_phase(register_delegate, _, _)", []),
+    ok = aehc_parent_mng:register(aehc_utils:delegate()).
 
 prep_stop(State) ->
     aec_block_generator:prep_stop(),
@@ -184,3 +188,10 @@ if_running(App, F) ->
 %% [sequential](https://github.com/erlang/otp/blob/OTP-20.3.8/erts/preloaded/src/init.erl#L787).
 is_app_running(App) ->
     lists:keymember(App, 1, application:which_applications()).
+
+
+
+%% NOTE: In order to start and the common sync procedure HC performs:
+%% - fetching the parent chain data via network interface (connector);
+%% - processing thq queue of parent chain blocks via acknowledgement interface
+%% andalso begin aehc_utils:confirm_commitment(), pop() end,
