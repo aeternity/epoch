@@ -42,6 +42,9 @@
         , deposit_with_signing_abort/1
         , withdraw_with_signing_abort/1
         , shutdown_with_signing_abort/1
+        , update_with_signer_disconnect/1
+        , deposit_with_signer_disconnect/1
+        , withdraw_with_signer_disconnect/1
         , deposit/1
         , slash/1
         , withdraw/1
@@ -115,6 +118,7 @@
 -include("../../aecontract/include/aecontract.hrl").
 -include("../../aecontract/test/include/aect_sophia_vsn.hrl").
 -include_lib("aecontract/include/hard_forks.hrl").
+-include("../src/aesc_codec.hrl").
 
 -define(TIMEOUT, 500).
 -define(SLIGHTLY_LONGER_TIMEOUT, 2000).
@@ -192,6 +196,7 @@ groups() ->
                              , {group, assume_min_depth}
                              , {group, errors}
                              , {group, client_reconnect}
+                             , {group, signer_disconnect}
                              , {group, signatures}
                              , {group, channel_ids}
                              , {group, round_too_low}
@@ -220,6 +225,12 @@ groups() ->
       , deposit_with_signing_abort
       , withdraw_with_signing_abort
       , shutdown_with_signing_abort
+      ]},
+     {signer_disconnect, [sequence],
+      [
+        update_with_signer_disconnect
+      , deposit_with_signer_disconnect
+      , withdraw_with_signer_disconnect
       ]},
      {failed_onchain, [sequence],
       [ deposit_with_failed_onchain
@@ -472,12 +483,10 @@ end_per_group(Group, Config) ->
                                       responder_is_ga, both_are_ga]) of
                 true ->
                     ok;
-                    %%_Config1 = stop_node(dev1, Config);
                 false -> pass
             end;
         false ->
             ok
-            %%_Config1 = stop_node(dev1, Config)
     end,
     ok.
 
@@ -503,10 +512,6 @@ init_per_testcase(_, Config) ->
 end_per_testcase(_Case, _Config) ->
     bump_idx(),
     ok.
-
-stop_node(N, Config) ->
-    aecore_suite_utils:stop_node(N, Config),
-    Config.
 
 %%%===================================================================
 %%% Test state
@@ -1076,6 +1081,54 @@ op_with_signing_abort(Op, Args, SignTag1, RptTag2, SignTag2, Cfg) ->
     {ok, Round0} = rpc(dev1, aesc_fsm, get_round, [FsmI]),
     ?PEEK_MSGQ(Debug),
     shutdown_(I, R, Cfg),
+    ok.
+
+update_with_signer_disconnect(Cfg) ->
+    op_with_signer_disconnect(
+      upd_transfer,
+      fun(Fsm, Amt, #{spec := #{initiator := PubI, responder := PubR}}) ->
+              [Fsm, PubI, PubR, Amt]
+      end, update, update, update_ack, Cfg).
+
+deposit_with_signer_disconnect(Cfg) ->
+    op_with_signer_disconnect(
+      upd_deposit,
+      fun(Fsm, Amt, _) ->
+              [Fsm, #{amount => Amt}]
+      end, deposit_tx, deposit_created, deposit_created, Cfg).
+
+withdraw_with_signer_disconnect(Cfg) ->
+    op_with_signer_disconnect(
+      upd_withdraw,
+      fun(Fsm, Amt, _) ->
+              [Fsm, #{amount => Amt}]
+      end, withdraw_tx, withdraw_created, withdraw_created, Cfg).
+
+op_with_signer_disconnect(Op, Args, SignTag1, RptTag2, SignTag2, Cfg) ->
+    Debug = get_debug(Cfg),
+    #{ i := #{fsm := FsmI} = I
+     , r := #{fsm := FsmR} = R
+     , spec := #{ initiator := PubI
+                , responder := PubR }} = Spec = create_channel_(
+                                                  [?SLOGAN|Cfg]),
+    {BalI, BalR} = get_both_balances(FsmI, PubI, PubR),
+    {ok, Round0} = rpc(dev1, aesc_fsm, get_round, [FsmR]),
+    %%
+    %% Initiator client aborts
+    %%
+    rpc(dev1, aesc_fsm, Op, Args(FsmR, 1, Spec)),
+    {_, _} = await_signing_request(SignTag1, R, Debug, Cfg),
+    {ok, _} = receive_from_fsm(info, I, RptTag2, ?TIMEOUT, Debug),
+    _SignedTx = signer_disconnects(SignTag2, I, ?TIMEOUT, Debug),
+    Pat = #{info => #{error_code => ?ERR_CLIENT_DISCONNECTED,
+                      round => Round0}},
+    {ok, _} = receive_from_fsm(conflict, R, Pat, ?TIMEOUT, Debug),
+    #{fsm := FsmI1} = I1 = reconnect(I, Debug),
+    wait_for_open(FsmR, Debug),
+    wait_for_open(FsmI1, Debug),
+    {BalI, BalR} = get_both_balances(FsmI1, PubI, PubR),
+    {ok, Round0} = rpc(dev1, aesc_fsm, get_round, [FsmI1]),
+    shutdown_(I1, R, Cfg),
     ok.
 
 signing_req() ->
@@ -2417,8 +2470,8 @@ ch_loop(I, R, Parent, Cfg, St) ->
                                   end, I, R, Cfg),
             {I1_, R1_}
             catch
-                error:R ->
-                    ?LOG("CAUGHT ~p / ~p", [R, erlang:get_stacktrace()]),
+                error:R:ST ->
+                    ?LOG("CAUGHT ~p / ~p", [R, ST]),
                     {I, R}
             end,
             Parent ! {self(), loop_ack},
@@ -2936,6 +2989,22 @@ abort_signing_request(Tag, #{fsm := Fsm}, Code, Timeout, Debug) ->
             error(timeout)
     end.
 
+signer_disconnects(Tag, #{fsm := Fsm, proxy := Proxy}, Timeout, Debug) ->
+    ?LOG(Debug, "waiting to disconnect during signing req, Fsm = ~p", [Fsm]),
+    receive
+        {aesc_fsm, Fsm, #{ type := sign, tag := Tag
+                         , info := #{ signed_tx := SignedTx
+                                    , updates   := _ } } = Msg} ->
+            ?LOG(Debug, "disconnect after getting from ~p: ~p", [Fsm, Msg]),
+            unlink(Proxy),
+            exit(Proxy, kill),
+            timer:sleep(50),
+            SignedTx
+    after Timeout ->
+            ?LOG(Debug, "Timeout. Q = ~p", [element(2,process_info(self(), messages))]),
+            error(timeout)
+    end.
+
 sign_tx(Signer, Tx, Cfg) ->
     co_sign_tx(Signer, aetx_sign:new(Tx, []), Cfg).
 
@@ -3105,6 +3174,7 @@ receive_from_fsm_(Tag, #{role := Role, fsm := Fsm} = R, Msg, TRef, Debug, Cont) 
     receive
         {aesc_fsm, Fsm, #{type := Type, tag := Tag} = Msg1} ->
             ?LOG(Debug, "~p: received ~p:~p/~p", [Role, Type, Tag, Msg1]),
+            ?LOG(Debug, "Pattern to match: ~p", [Msg]),
             try match_msgs(Msg, Msg1, Cont)
             catch
                 throw:continue ->
@@ -3152,7 +3222,8 @@ match_msgs(Pat, M, Cont) when is_map(M), is_map(Pat) ->
     try match_info(M, Pat),
         {ok, M}
     catch
-        error:_ when Cont ->
+        error:E when Cont ->
+            ?LOG("CAUGHT ~p (M = ~p)", [E, M]),
             throw(continue)
     end;
 match_msgs(_, _, true) ->
@@ -4310,7 +4381,7 @@ extract_nonce_from_btc_auth_store(Store) ->
             {ok, {Nonce, _}} = aeb_heap:from_binary({tuple, [word, {tuple, [word, word]}]},
                                                     EncodedHeap),
             Nonce;
-        #{<<0, 1>> := FateValue} = X ->
+        #{<<0, 1>> := FateValue} ->
             aeb_fate_encoding:deserialize(FateValue)
     end.
 
@@ -5711,11 +5782,11 @@ missing_malicious_close(Cfg0) ->
     ok = rpc(dev1, aec_tx_pool, push, [SignedCloseSoloTx]),
     TxHash = aeser_api_encoder:encode(tx_hash, aetx_sign:hash(SignedCloseSoloTx)),
     mine_blocks_until_txs_on_chain(dev1, [TxHash]),
-    SlashTx = await_on_chain_report(R2, #{info => can_slash}, ?TIMEOUT),
+    _SlashTx = await_on_chain_report(R2, #{info => can_slash}, ?TIMEOUT),
     {ok,_} = receive_from_fsm(info, R2, fun closing/1, ?TIMEOUT, Debug),
     %% reestablish initiator
     Info = #{i => I3, r => R2, spec => Spec},
-    #{i := #{fsm_id := _IFsmId1} = I4, r := #{fsm_id := _RFsmId1} = R3} =
+    #{i := #{fsm_id := _IFsmId1} = I4, r := #{fsm_id := _RFsmId1}} =
         reestablish_(Info, SignedTx, ?PORT, Debug),
     SignedCloseSoloTx = await_on_chain_report(I4, #{info => can_slash}, ?TIMEOUT),
     assert_empty_msgq(Debug),
@@ -6032,7 +6103,7 @@ snapshot_and_conflict(Cfg) ->
 
 force_progress_and_conflict(Cfg) ->
     Debug = get_debug(Cfg),
-    #{ i := #{fsm := FsmI} = I
+    #{ i := #{fsm := _FsmI} = I
      , r := #{fsm := FsmR} = R
      , spec := #{ initiator := PubI
                 , responder := PubR }} = create_channel_([?SLOGAN|Cfg]),
